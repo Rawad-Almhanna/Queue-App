@@ -1,6 +1,15 @@
 /** App name — replaced by the CLI during scaffolding */
 export const APP_NAME = 'queue-app-1'
 
+/**
+ * What the product calls itself on screen.
+ *
+ * Separate from `APP_NAME`, which is the deploy identity and shows up in
+ * hostnames and CLI output. Renaming the product should not risk touching
+ * either of those.
+ */
+export const APP_TITLE = 'Queue'
+
 /** Immutable app identity — data scope keys to this, so renames never
  *  strand your records.
  *

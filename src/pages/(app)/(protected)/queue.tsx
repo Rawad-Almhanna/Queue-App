@@ -141,9 +141,10 @@ export default function CreateQueuePage() {
     void navigate(`/q/${result.data.code}`)
   }
 
+  /** A link beats a code when the person you are sharing with is not in the room. */
   async function handleCopy(code: string) {
     try {
-      await navigator.clipboard.writeText(code)
+      await navigator.clipboard.writeText(`${window.location.origin}/q/${code}`)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch {
@@ -154,10 +155,10 @@ export default function CreateQueuePage() {
   if (created) {
     return (
       <div className="min-h-full text-foreground">
-        <div className="mx-auto max-w-md px-6 py-16">
+        <div className="mx-auto max-w-md px-4 py-12 sm:px-6">
           <div
             data-testid="room-created"
-            className="rounded-lg border border-border bg-card p-6 text-center"
+            className="rounded-lg border border-border bg-card p-5 text-center sm:p-6"
           >
             <h1 className="text-xl font-semibold">{created.name} is ready</h1>
             <p className="mt-2 text-sm text-muted-foreground">
@@ -166,7 +167,7 @@ export default function CreateQueuePage() {
 
             <p
               data-testid="room-code"
-              className="my-6 font-mono text-4xl font-bold tracking-[0.3em]"
+              className="my-6 font-mono text-3xl font-bold tracking-[0.25em] sm:text-4xl sm:tracking-[0.3em]"
             >
               {created.code}
             </p>
@@ -184,7 +185,7 @@ export default function CreateQueuePage() {
               className="mt-2 w-full"
               onClick={() => handleCopy(created.code)}
             >
-              {copied ? 'Copied' : 'Copy code'}
+              {copied ? 'Link copied' : 'Copy invite link'}
             </Button>
             <Button
               data-testid="create-another"
@@ -202,12 +203,17 @@ export default function CreateQueuePage() {
 
   return (
     <div className="min-h-full text-foreground">
-      <div className="mx-auto max-w-md px-6 py-12">
+      <div className="mx-auto max-w-md px-4 py-10 sm:px-6">
+        <h1 className="text-2xl font-semibold tracking-tight">Queues</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Open one with a code, or set up a new shared resource.
+        </p>
+
         <form
           data-testid="join-by-code-form"
           onSubmit={handleJoinByCode}
           noValidate
-          className="rounded-lg border border-border bg-card p-5"
+          className="mt-6 rounded-lg border border-border bg-card p-5"
         >
           <Label htmlFor="join-code">Have a code?</Label>
           <div className="mt-3 flex gap-2">
@@ -236,8 +242,8 @@ export default function CreateQueuePage() {
           )}
         </form>
 
-        <h1 className="mt-12 text-2xl font-semibold tracking-tight">Start a queue</h1>
-        <p className="mt-2 text-sm text-muted-foreground">
+        <h2 className="mt-10 text-lg font-semibold tracking-tight">Start a queue</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
           Set up a shared resource and get a code to pass around.
         </p>
 
@@ -248,7 +254,7 @@ export default function CreateQueuePage() {
           // validator runs, so the user would get the browser's message
           // instead of the rule the server actually enforces.
           noValidate
-          className="mt-8 space-y-5 rounded-lg border border-border bg-card p-6"
+          className="mt-4 space-y-5 rounded-lg border border-border bg-card p-5 sm:p-6"
         >
           <div className="space-y-2">
             <Label htmlFor="room-name">What is being shared?</Label>

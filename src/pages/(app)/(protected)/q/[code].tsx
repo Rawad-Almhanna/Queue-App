@@ -209,7 +209,9 @@ export default function QueueRoomPage() {
         <section
           data-testid="current-turn"
           data-phase={phase}
-          className="mt-6 rounded-lg border border-border bg-card p-5"
+          className={`mt-6 rounded-lg border bg-card p-5 ${
+            iHoldTheTurn ? 'border-primary ring-1 ring-primary' : 'border-border'
+          }`}
         >
           <div className="flex items-start justify-between gap-3">
             <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
@@ -218,11 +220,14 @@ export default function QueueRoomPage() {
             {phase !== 'idle' && (
               <span
                 data-testid="turn-countdown"
-                className={`font-mono text-sm tabular-nums ${
-                  secondsLeft === 0 ? 'text-destructive' : 'text-muted-foreground'
+                // The clock is the thing people watch, so it gets real size —
+                // and turns red only in the last ten seconds, when that is
+                // information rather than decoration.
+                className={`font-mono text-2xl font-semibold tabular-nums ${
+                  secondsLeft <= 10 ? 'text-destructive' : 'text-foreground'
                 }`}
               >
-                {secondsLeft === 0 ? 'time is up — moving on…' : formatClock(secondsLeft)}
+                {secondsLeft === 0 ? '0:00' : formatClock(secondsLeft)}
               </span>
             )}
           </div>
@@ -241,10 +246,14 @@ export default function QueueRoomPage() {
                 </span>
               </p>
               <p data-testid="turn-phase" className="mt-1 text-sm text-muted-foreground">
-                {phase === 'active'
-                  ? 'Turn in progress'
-                  : `Hasn't started yet — ${formatDuration(room.data.graceSeconds)} to begin`}
-                {!presentUserIds.has(room.data.holderUserId) && ' · not in the room'}
+                {secondsLeft === 0
+                  ? 'Time is up — moving on…'
+                  : phase === 'active'
+                    ? 'Turn in progress'
+                    : `Hasn't started yet — ${formatDuration(room.data.graceSeconds)} to begin`}
+                {secondsLeft > 0 &&
+                  !presentUserIds.has(room.data.holderUserId) &&
+                  ' · not in the room'}
               </p>
             </>
           )}
@@ -349,7 +358,7 @@ export default function QueueRoomPage() {
               disabled={pending !== null}
               onClick={() => run('leaveQueue', {}, 'You left the queue')}
             >
-              Leave
+              Leave the queue
             </Button>
           </div>
         )}
