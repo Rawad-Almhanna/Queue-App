@@ -28,7 +28,9 @@ export const DEFAULT_GRACE_SECONDS = 30
 export const MAX_NAME_LENGTH = 80
 export const MAX_LOCATION_LENGTH = 80
 
-export interface QueueRoomData {
+// Declared as object types rather than interfaces so they satisfy the
+// `Record<string, unknown>` constraint on `tools.create` / `tools.update`.
+export type QueueRoomData = {
   /** Resource being shared, e.g. "Dryer 3". */
   name: string
   /** Optional free text, e.g. "Basement". Empty string when unset. */
@@ -53,7 +55,7 @@ export interface QueueRoomData {
   turnSeq: number
 }
 
-export interface QueueEntryData {
+export type QueueEntryData = {
   /** Room code this entry belongs to; also the `where` filter for queries. */
   roomId: string
   /** Participant. Declared `userBound` so a client cannot claim another id. */

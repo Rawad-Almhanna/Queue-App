@@ -6,6 +6,7 @@
  * random source so tests can pin it.
  */
 
+import { formatDuration } from './duration'
 import {
   DEFAULT_GRACE_SECONDS,
   DEFAULT_TURN_SECONDS,
@@ -87,7 +88,7 @@ export function validateCreateRoom(input: CreateRoomInput): CreateRoomValidation
     return {
       ok: false,
       field: 'turnSeconds',
-      error: `Turn length must be between ${MIN_TURN_SECONDS} and ${MAX_TURN_SECONDS} seconds.`,
+      error: `Turn length must be between ${formatDuration(MIN_TURN_SECONDS)} and ${formatDuration(MAX_TURN_SECONDS)}.`,
     }
   }
 
@@ -100,7 +101,7 @@ export function validateCreateRoom(input: CreateRoomInput): CreateRoomValidation
     return {
       ok: false,
       field: 'graceSeconds',
-      error: `Grace period must be between ${MIN_GRACE_SECONDS} and ${MAX_GRACE_SECONDS} seconds.`,
+      error: `Grace period must be between ${formatDuration(MIN_GRACE_SECONDS)} and ${formatDuration(MAX_GRACE_SECONDS)}.`,
     }
   }
 
