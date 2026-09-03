@@ -71,3 +71,29 @@ export async function createTestRoom(
   if (!result.success) throw new Error(`createRoom failed: ${result.error}`)
   return { code: result.data.code, name }
 }
+
+/**
+ * The signed-in user's id, read from the same JWT the actions verify.
+ *
+ * Owner-permission tests need to name a victim for `removeParticipant`, and
+ * this is the only way to learn another browser's id without trusting the page
+ * to have already rendered it.
+ */
+export async function currentUserId(page: Page): Promise<string> {
+  const token = await authToken(page)
+  const segment = token.split('.')[1]
+  if (!segment) throw new Error('Auth token is not a JWT.')
+
+  const json = Buffer.from(segment.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')
+  const claims = JSON.parse(json) as { sub?: string; userId?: string }
+
+  const userId = claims.sub ?? claims.userId
+  if (!userId) throw new Error(`No subject claim in the auth token: ${json}`)
+  return userId
+}
+
+/** Puts `page`'s user in `code`, failing loudly rather than half-setting-up a test. */
+export async function joinRoom(page: Page, code: string, displayName: string): Promise<void> {
+  const result = await callAction(page, 'joinQueue', { code, displayName })
+  if (!result.success) throw new Error(`joinQueue failed for ${displayName}: ${result.error}`)
+}

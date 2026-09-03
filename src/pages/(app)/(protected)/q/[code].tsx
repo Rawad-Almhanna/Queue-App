@@ -5,17 +5,32 @@
  * re-renders the moment the Durable Object broadcasts a change — including
  * changes made by a server action, which is how every queue write happens.
  * Nothing on this page polls.
+ *
+ * The buttons here mirror the server's rules but do not constitute them: each
+ * one calls an action whose transition re-checks the caller. Hiding the owner
+ * controls is a courtesy to non-owners, not the permission boundary.
  */
 
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { useAuth, useQuery, useUser } from 'deepspace'
+import { useAuth, usePresenceRoom, useQuery, useUser } from 'deepspace'
 import { Badge, Button, Input, useToast } from '@/components/ui'
 import { callQueueAction } from '../../../../queue/client'
-import { phaseOf, positionOf, waitingList } from '../../../../queue/logic'
-import { formatDuration } from '../../../../queue/duration'
+import {
+  graceDeadline,
+  phaseOf,
+  positionOf,
+  turnDeadline,
+  waitingList,
+} from '../../../../queue/logic'
+import { formatClock, formatDuration } from '../../../../queue/duration'
 import { normalizeRoomCode } from '../../../../queue/room'
-import type { QueueEntryData, QueueRoomData, QueueState } from '../../../../queue/types'
+import type {
+  QueueEntry,
+  QueueEntryData,
+  QueueRoomData,
+  QueueState,
+} from '../../../../queue/types'
 
 export default function QueueRoomPage() {
   const { code: rawCode } = useParams<{ code: string }>()
@@ -34,11 +49,65 @@ export default function QueueRoomPage() {
     orderDir: 'asc',
   })
 
+  /**
+   * Who has this room open right now.
+   *
+   * This is a separate ephemeral Durable Object from the records above —
+   * nothing here is stored, and a peer disappears when their socket closes.
+   * That is deliberate: presence answers "is this person at the machine",
+   * which would be a lie the moment it outlived the connection.
+   */
+  const { peers, connected } = usePresenceRoom(`queue:${code}`)
+
+  // `peers` excludes self by design, so our own id is added back from the
+  // connection state — otherwise you would always look absent to yourself.
+  const presentUserIds = useMemo(() => {
+    const ids = new Set(peers.map((peer) => peer.userId))
+    if (connected && userId) ids.add(userId)
+    return ids
+  }, [peers, connected, userId])
+
   const [joinName, setJoinName] = useState('')
-  const [joining, setJoining] = useState(false)
+  const [pending, setPending] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
 
   const room = rooms[0]
+  const roomEnvelope = room
+    ? { recordId: code, data: room.data, createdBy: room.createdBy }
+    : null
+  const phase = roomEnvelope ? phaseOf(roomEnvelope) : 'idle'
+
+  // Re-render once a second only while a clock is actually running.
+  useTick(phase !== 'idle')
+
+  const deadline = !roomEnvelope
+    ? 0
+    : phase === 'assigned'
+      ? graceDeadline(roomEnvelope)
+      : phase === 'active'
+        ? turnDeadline(roomEnvelope)
+        : 0
+  const secondsLeft = deadline > 0 ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) : 0
+
+  /**
+   * Nudge the server the instant this turn runs out.
+   *
+   * The cron task is the authority, but one minute is its finest interval, so
+   * an unattended countdown could sit at zero for most of a minute. Whoever
+   * has the page open asks the server to re-check instead. The ref keys on
+   * `turnSeq` so each turn is nudged exactly once per client, and the action
+   * is idempotent besides — several clients hitting it together is harmless.
+   */
+  const turnSeq = room?.data.turnSeq ?? -1
+  const expired = deadline > 0 && secondsLeft === 0
+  const nudgedFor = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (!expired) return
+    if (nudgedFor.current === turnSeq) return
+    nudgedFor.current = turnSeq
+    void callQueueAction('sweepRoom', { code })
+  }, [expired, turnSeq, code])
 
   if (roomStatus === 'loading' && !room) {
     return <CenteredNote testId="room-loading">Loading the queue…</CenteredNote>
@@ -62,11 +131,21 @@ export default function QueueRoomPage() {
   }
 
   const waiting = waitingList(state)
-  const phase = phaseOf(state.room)
   const myPosition = userId ? positionOf(state, userId) : 0
   const iHoldTheTurn = Boolean(userId) && room.data.holderUserId === userId
   const iAmOwner = Boolean(userId) && room.createdBy === userId
   const inQueue = iHoldTheTurn || myPosition > 0
+
+  async function run(action: string, params: Record<string, unknown>, done?: string) {
+    setPending(action)
+    const result = await callQueueAction(action, { code, ...params })
+    setPending(null)
+    if (!result.success) {
+      toastError('That did not work', result.error)
+      return
+    }
+    if (done) success(done)
+  }
 
   async function handleJoin(event: React.FormEvent) {
     event.preventDefault()
@@ -76,9 +155,9 @@ export default function QueueRoomPage() {
       return
     }
 
-    setJoining(true)
+    setPending('joinQueue')
     const result = await callQueueAction<{ hasTurn: boolean }>('joinQueue', { code, displayName })
-    setJoining(false)
+    setPending(null)
 
     if (!result.success) {
       toastError('Could not join', result.error)
@@ -132,9 +211,21 @@ export default function QueueRoomPage() {
           data-phase={phase}
           className="mt-6 rounded-lg border border-border bg-card p-5"
         >
-          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Using it now
-          </p>
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Using it now
+            </p>
+            {phase !== 'idle' && (
+              <span
+                data-testid="turn-countdown"
+                className={`font-mono text-sm tabular-nums ${
+                  secondsLeft === 0 ? 'text-destructive' : 'text-muted-foreground'
+                }`}
+              >
+                {secondsLeft === 0 ? 'time is up — moving on…' : formatClock(secondsLeft)}
+              </span>
+            )}
+          </div>
 
           {phase === 'idle' ? (
             <p data-testid="turn-holder" className="mt-2 text-lg font-medium">
@@ -142,24 +233,84 @@ export default function QueueRoomPage() {
             </p>
           ) : (
             <>
-              <p data-testid="turn-holder" className="mt-2 text-lg font-medium">
-                {room.data.holderName}
-                {iHoldTheTurn && <span className="text-muted-foreground"> (you)</span>}
+              <p data-testid="turn-holder" className="mt-2 flex items-center gap-2 text-lg font-medium">
+                <PresenceDot present={presentUserIds.has(room.data.holderUserId)} />
+                <span>
+                  {room.data.holderName}
+                  {iHoldTheTurn && <span className="text-muted-foreground"> (you)</span>}
+                </span>
               </p>
               <p data-testid="turn-phase" className="mt-1 text-sm text-muted-foreground">
                 {phase === 'active'
                   ? 'Turn in progress'
                   : `Hasn't started yet — ${formatDuration(room.data.graceSeconds)} to begin`}
+                {!presentUserIds.has(room.data.holderUserId) && ' · not in the room'}
               </p>
             </>
+          )}
+
+          {(iHoldTheTurn || (iAmOwner && phase !== 'idle')) && (
+            <div className="mt-4 flex flex-wrap gap-2">
+              {iHoldTheTurn && phase === 'assigned' && (
+                <Button
+                  data-testid="start-turn"
+                  disabled={pending !== null}
+                  onClick={() => run('startTurn', {}, 'Your turn has started')}
+                >
+                  Start my turn
+                </Button>
+              )}
+              {iHoldTheTurn && phase === 'active' && (
+                <Button
+                  data-testid="finish-turn"
+                  disabled={pending !== null}
+                  onClick={() => run('finishTurn', {}, 'Turn finished')}
+                >
+                  I&apos;m done
+                </Button>
+              )}
+              {iHoldTheTurn && (
+                <Button
+                  data-testid="leave-turn"
+                  variant="ghost"
+                  disabled={pending !== null}
+                  onClick={() => run('leaveQueue', {}, 'You left the queue')}
+                >
+                  Give up my turn
+                </Button>
+              )}
+              {iAmOwner && !iHoldTheTurn && phase !== 'idle' && (
+                <>
+                  <Button
+                    data-testid="advance-queue"
+                    variant="secondary"
+                    disabled={pending !== null}
+                    onClick={() => run('advanceQueue', {}, 'Moved the queue along')}
+                  >
+                    Move the queue along
+                  </Button>
+                  <Button
+                    data-testid="remove-holder"
+                    variant="ghost"
+                    disabled={pending !== null}
+                    onClick={() =>
+                      run('removeParticipant', { targetUserId: room.data.holderUserId })
+                    }
+                  >
+                    Remove
+                  </Button>
+                </>
+              )}
+            </div>
           )}
         </section>
 
         <section className="mt-6">
           <div className="flex items-baseline justify-between">
             <h2 className="text-sm font-semibold">Waiting</h2>
-            <span data-testid="waiting-count" className="text-sm text-muted-foreground">
-              {waiting.length}
+            <span className="text-sm text-muted-foreground">
+              <span data-testid="present-count">{presentUserIds.size}</span> here ·{' '}
+              <span data-testid="waiting-count">{waiting.length}</span> in line
             </span>
           </div>
 
@@ -170,31 +321,37 @@ export default function QueueRoomPage() {
           ) : (
             <ol data-testid="waiting-list" className="mt-3 space-y-2">
               {waiting.map((entry, index) => (
-                <li
+                <WaitingRow
                   key={entry.recordId}
-                  data-testid="waiting-entry"
-                  data-user-id={entry.data.userId}
-                  className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3"
-                >
-                  <span className="w-5 text-sm tabular-nums text-muted-foreground">
-                    {index + 1}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-sm">
-                    {entry.data.displayName}
-                    {entry.data.userId === userId && (
-                      <span className="text-muted-foreground"> (you)</span>
-                    )}
-                  </span>
-                </li>
+                  entry={entry}
+                  index={index}
+                  total={waiting.length}
+                  isMe={entry.data.userId === userId}
+                  isPresent={presentUserIds.has(entry.data.userId)}
+                  showOwnerControls={iAmOwner}
+                  busy={pending !== null}
+                  onRun={run}
+                />
               ))}
             </ol>
           )}
         </section>
 
         {myPosition > 0 && (
-          <p data-testid="my-position" className="mt-4 text-sm text-muted-foreground">
-            You are number <strong className="text-foreground">{myPosition}</strong> in line.
-          </p>
+          <div className="mt-4 flex items-center justify-between">
+            <p data-testid="my-position" className="text-sm text-muted-foreground">
+              You are number <strong className="text-foreground">{myPosition}</strong> in line.
+            </p>
+            <Button
+              data-testid="leave-queue"
+              variant="ghost"
+              size="sm"
+              disabled={pending !== null}
+              onClick={() => run('leaveQueue', {}, 'You left the queue')}
+            >
+              Leave
+            </Button>
+          </div>
         )}
 
         {!inQueue && (
@@ -216,8 +373,8 @@ export default function QueueRoomPage() {
                 value={joinName}
                 onChange={(event) => setJoinName(event.target.value)}
               />
-              <Button type="submit" data-testid="join-queue-submit" disabled={joining}>
-                {joining ? 'Joining…' : 'Join'}
+              <Button type="submit" data-testid="join-queue-submit" disabled={pending !== null}>
+                {pending === 'joinQueue' ? 'Joining…' : 'Join'}
               </Button>
             </div>
           </form>
@@ -225,6 +382,130 @@ export default function QueueRoomPage() {
       </div>
     </div>
   )
+}
+
+function WaitingRow({
+  entry,
+  index,
+  total,
+  isMe,
+  isPresent,
+  showOwnerControls,
+  busy,
+  onRun,
+}: {
+  entry: QueueEntry
+  index: number
+  total: number
+  isMe: boolean
+  isPresent: boolean
+  showOwnerControls: boolean
+  busy: boolean
+  onRun: (action: string, params: Record<string, unknown>, done?: string) => void
+}) {
+  return (
+    <li
+      data-testid="waiting-entry"
+      data-user-id={entry.data.userId}
+      data-present={isPresent}
+      className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3"
+    >
+      <span className="w-5 text-sm tabular-nums text-muted-foreground">{index + 1}</span>
+      <PresenceDot present={isPresent} />
+      <span className={`min-w-0 flex-1 truncate text-sm ${isPresent ? '' : 'text-muted-foreground'}`}>
+        {entry.data.displayName}
+        {isMe && <span className="text-muted-foreground"> (you)</span>}
+        {!isPresent && <span className="ml-2 text-xs text-muted-foreground">away</span>}
+      </span>
+
+      {showOwnerControls && (
+        <span className="flex items-center gap-1">
+          <IconButton
+            testId="move-up"
+            label="Move up"
+            disabled={busy || index === 0}
+            onClick={() => onRun('reorderEntry', { recordId: entry.recordId, direction: 'up' })}
+          >
+            ↑
+          </IconButton>
+          <IconButton
+            testId="move-down"
+            label="Move down"
+            disabled={busy || index === total - 1}
+            onClick={() => onRun('reorderEntry', { recordId: entry.recordId, direction: 'down' })}
+          >
+            ↓
+          </IconButton>
+          <IconButton
+            testId="remove-entry"
+            label={`Remove ${entry.data.displayName}`}
+            disabled={busy}
+            onClick={() => onRun('removeParticipant', { targetUserId: entry.data.userId })}
+          >
+            ×
+          </IconButton>
+        </span>
+      )}
+    </li>
+  )
+}
+
+function IconButton({
+  testId,
+  label,
+  disabled,
+  onClick,
+  children,
+}: {
+  testId: string
+  label: string
+  disabled: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+      className="rounded-md border border-border px-2 py-1 text-sm leading-none text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+    >
+      {children}
+    </button>
+  )
+}
+
+/**
+ * Present or away. The label is not decoration — a screen reader gets the same
+ * distinction a sighted user gets from the colour.
+ */
+function PresenceDot({ present }: { present: boolean }) {
+  const label = present ? 'In the room' : 'Not in the room'
+  return (
+    <span
+      data-testid="presence-dot"
+      data-present={present}
+      role="img"
+      aria-label={label}
+      title={label}
+      className={`size-2 shrink-0 rounded-full ${
+        present ? 'bg-emerald-500' : 'border border-muted-foreground/50 bg-transparent'
+      }`}
+    />
+  )
+}
+
+/** Drives the countdown. Idle rooms have no clock, so they get no interval. */
+function useTick(active: boolean) {
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (!active) return
+    const id = setInterval(() => setTick((value) => value + 1), 1000)
+    return () => clearInterval(id)
+  }, [active])
 }
 
 function CenteredNote({ testId, children }: { testId: string; children: React.ReactNode }) {
