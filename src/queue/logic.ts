@@ -44,10 +44,21 @@ export function turnDeadline(room: QueueRoom): number {
   return room.data.turnStartedAt + room.data.turnSeconds * 1000
 }
 
-/** The waiting list in display order. Ties break deterministically. */
+/**
+ * The waiting list in display order. Ties break deterministically.
+ *
+ * The current holder is excluded even if a row for them survives: writes are
+ * not transactional, so a hand-off that patched the room and then failed to
+ * delete the entry would otherwise show one person in two places. Dropping
+ * them here means the UI self-heals and the next hand-off clears the row.
+ */
 export function waitingList(state: QueueState): QueueEntry[] {
   return [...state.entries]
-    .filter((entry) => entry.data.roomId === state.room.recordId)
+    .filter(
+      (entry) =>
+        entry.data.roomId === state.room.recordId &&
+        entry.data.userId !== state.room.data.holderUserId,
+    )
     .sort(
       (a, b) =>
         a.data.position - b.data.position ||

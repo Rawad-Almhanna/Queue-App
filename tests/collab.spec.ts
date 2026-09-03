@@ -16,6 +16,7 @@
  * cleanup. No need to manage browser contexts manually.
  */
 import { test, expect, loadAllTestAccounts } from 'deepspace/testing'
+import { callAction, createTestRoom, testRoomName } from './helpers/queue'
 
 // A machine that has never created test accounts is the normal state of a
 // fresh checkout, and there `users()` throws — turning "you have no pool yet"
@@ -131,3 +132,116 @@ test('API status page shows local retry after first-load API failure', async ({ 
   await expect.poll(() => requestCount).toBeGreaterThan(requestsAfterFailure)
   expect(user.page.url()).toBe(urlAfterFailure)
 })
+
+/**
+ * Live queue sync.
+ *
+ * Every write below goes through a server action, so these also prove that
+ * action writes broadcast over the records WebSocket: neither page reloads,
+ * and no assertion polls an endpoint.
+ */
+test.describe('Queue room sync', () => {
+  test('two people see the same queue without reloading', async ({ users }) => {
+    const [alice, bob] = await users(2)
+
+    await alice.page.goto('/home')
+    await bob.page.goto('/home')
+
+    const { code, name } = await createTestRoom(alice.page, { name: testRoomName('Shared dryer') })
+
+    await alice.page.goto(`/q/${code}`)
+    await bob.page.goto(`/q/${code}`)
+
+    // Both render the same room.
+    for (const user of [alice, bob]) {
+      await expect(user.page.getByTestId('room-title')).toHaveText(name, { timeout: 15_000 })
+      await expect(user.page.getByTestId('room-code')).toHaveText(code)
+    }
+
+    // Nobody has joined, so the resource is free on both screens.
+    for (const user of [alice, bob]) {
+      await expect(user.page.getByTestId('current-turn')).toHaveAttribute('data-phase', 'idle')
+      await expect(user.page.getByTestId('waiting-empty')).toBeVisible()
+    }
+
+    // Alice joins an empty queue, so she takes the turn immediately.
+    await alice.page.getByTestId('join-name-input').fill('Alice')
+    await alice.page.getByTestId('join-queue-submit').click()
+
+    // Bob's page updates over the WebSocket, with no reload.
+    await expect(bob.page.getByTestId('turn-holder')).toHaveText('Alice', { timeout: 15_000 })
+    await expect(bob.page.getByTestId('current-turn')).toHaveAttribute('data-phase', 'assigned')
+    await expect(alice.page.getByTestId('turn-holder')).toContainText('Alice (you)')
+
+    // Bob joins behind her; Alice sees him arrive.
+    await bob.page.getByTestId('join-name-input').fill('Bob')
+    await bob.page.getByTestId('join-queue-submit').click()
+
+    await expect(alice.page.getByTestId('waiting-entry')).toHaveCount(1, { timeout: 15_000 })
+    await expect(alice.page.getByTestId('waiting-entry').first()).toContainText('Bob')
+    await expect(alice.page.getByTestId('waiting-count')).toHaveText('1')
+
+    // Bob is told where he stands; Alice, who holds the turn, is not in line.
+    await expect(bob.page.getByTestId('my-position')).toContainText('1')
+    await expect(alice.page.getByTestId('my-position')).toHaveCount(0)
+  })
+
+  test('the queue keeps its order across both clients', async ({ users }) => {
+    const [alice, bob] = await users(2)
+    await alice.page.goto('/home')
+    await bob.page.goto('/home')
+
+    const { code } = await createTestRoom(alice.page, { name: testRoomName('Order') })
+
+    // Alice takes the turn, Bob queues behind her — both server-side.
+    await callAction(alice.page, 'joinQueue', { code, displayName: 'Alice' })
+    await callAction(bob.page, 'joinQueue', { code, displayName: 'Bob' })
+
+    await alice.page.goto(`/q/${code}`)
+    await bob.page.goto(`/q/${code}`)
+
+    for (const user of [alice, bob]) {
+      await expect(user.page.getByTestId('turn-holder')).toContainText('Alice', { timeout: 15_000 })
+      await expect(user.page.getByTestId('waiting-entry')).toHaveCount(1)
+      await expect(user.page.getByTestId('waiting-entry').first()).toContainText('Bob')
+    }
+  })
+
+  test('only the room creator is shown as the owner', async ({ users }) => {
+    const [alice, bob] = await users(2)
+    await alice.page.goto('/home')
+    await bob.page.goto('/home')
+
+    const { code } = await createTestRoom(alice.page, { name: testRoomName('Ownership') })
+
+    await alice.page.goto(`/q/${code}`)
+    await bob.page.goto(`/q/${code}`)
+
+    await expect(alice.page.getByTestId('owner-badge')).toBeVisible({ timeout: 15_000 })
+    await expect(bob.page.getByTestId('room-title')).toBeVisible({ timeout: 15_000 })
+    await expect(bob.page.getByTestId('owner-badge')).toHaveCount(0)
+  })
+
+  test('an unknown room code reports itself instead of rendering an empty queue', async ({
+    users,
+  }) => {
+    const [alice] = await users(1)
+    await alice.page.goto('/q/ZZZZZZ')
+    await expect(alice.page.getByTestId('room-not-found')).toBeVisible({ timeout: 15_000 })
+  })
+
+  test('joining twice is refused by the server', async ({ users }) => {
+    const [alice] = await users(1)
+    await alice.page.goto('/home')
+
+    const { code } = await createTestRoom(alice.page, { name: testRoomName('Double join') })
+
+    const first = await callAction(alice.page, 'joinQueue', { code, displayName: 'Alice' })
+    expect(first.success).toBe(true)
+
+    const second = await callAction(alice.page, 'joinQueue', { code, displayName: 'Alice' })
+    expect(second.success).toBe(false)
+    if (!second.success) expect(second.error).toMatch(/already/i)
+  })
+})
+

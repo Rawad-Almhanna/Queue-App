@@ -8,11 +8,16 @@
  */
 
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Button, Input, Label, cn, useToast } from '@/components/ui'
 import { callQueueAction } from '../../../queue/client'
-import { validateCreateRoom } from '../../../queue/room'
+import { isValidRoomCode, normalizeRoomCode, validateCreateRoom } from '../../../queue/room'
 import { formatDuration, splitDuration, toSeconds, type DurationUnit } from '../../../queue/duration'
-import { DEFAULT_GRACE_SECONDS, DEFAULT_TURN_SECONDS } from '../../../queue/types'
+import {
+  DEFAULT_GRACE_SECONDS,
+  DEFAULT_TURN_SECONDS,
+  ROOM_CODE_LENGTH,
+} from '../../../queue/types'
 
 interface CreatedRoom {
   code: string
@@ -77,7 +82,11 @@ export default function CreateQueuePage() {
   const [error, setError] = useState<string | null>(null)
   const [created, setCreated] = useState<CreatedRoom | null>(null)
   const [copied, setCopied] = useState(false)
+  const [joinCode, setJoinCode] = useState('')
+  const [joinError, setJoinError] = useState<string | null>(null)
+  const [checkingCode, setCheckingCode] = useState(false)
   const { success, error: toastError } = useToast()
+  const navigate = useNavigate()
 
   const turnSeconds = toSeconds(turnValue, turnUnit)
   const graceSeconds = toSeconds(graceValue, graceUnit)
@@ -108,6 +117,28 @@ export default function CreateQueuePage() {
 
     setCreated({ code: result.data.code, name: validation.data.name })
     success('Queue created', `Share the code ${result.data.code}`)
+  }
+
+  /** Resolve the code server-side first, so a typo says so instead of opening an empty room. */
+  async function handleJoinByCode(event: React.FormEvent) {
+    event.preventDefault()
+    setJoinError(null)
+
+    const code = normalizeRoomCode(joinCode)
+    if (!isValidRoomCode(code)) {
+      setJoinError('Room codes are 6 characters, like ABC234.')
+      return
+    }
+
+    setCheckingCode(true)
+    const result = await callQueueAction<{ code: string }>('getRoom', { code })
+    setCheckingCode(false)
+
+    if (!result.success) {
+      setJoinError(result.error)
+      return
+    }
+    void navigate(`/q/${result.data.code}`)
   }
 
   async function handleCopy(code: string) {
@@ -141,9 +172,16 @@ export default function CreateQueuePage() {
             </p>
 
             <Button
+              data-testid="open-created-room"
+              className="w-full"
+              onClick={() => void navigate(`/q/${created.code}`)}
+            >
+              Open the queue
+            </Button>
+            <Button
               data-testid="copy-room-code"
               variant="secondary"
-              className="w-full"
+              className="mt-2 w-full"
               onClick={() => handleCopy(created.code)}
             >
               {copied ? 'Copied' : 'Copy code'}
@@ -164,8 +202,41 @@ export default function CreateQueuePage() {
 
   return (
     <div className="min-h-full text-foreground">
-      <div className="mx-auto max-w-md px-6 py-16">
-        <h1 className="text-2xl font-semibold tracking-tight">Start a queue</h1>
+      <div className="mx-auto max-w-md px-6 py-12">
+        <form
+          data-testid="join-by-code-form"
+          onSubmit={handleJoinByCode}
+          noValidate
+          className="rounded-lg border border-border bg-card p-5"
+        >
+          <Label htmlFor="join-code">Have a code?</Label>
+          <div className="mt-3 flex gap-2">
+            <Input
+              id="join-code"
+              data-testid="join-code-input"
+              className="flex-1 font-mono uppercase tracking-widest"
+              placeholder="ABC234"
+              maxLength={ROOM_CODE_LENGTH}
+              value={joinCode}
+              onChange={(event) => setJoinCode(event.target.value.toUpperCase())}
+            />
+            <Button
+              type="submit"
+              variant="secondary"
+              data-testid="join-by-code-submit"
+              disabled={checkingCode}
+            >
+              {checkingCode ? 'Checking…' : 'Open'}
+            </Button>
+          </div>
+          {joinError && (
+            <p data-testid="join-code-error" role="alert" className="mt-3 text-sm text-destructive">
+              {joinError}
+            </p>
+          )}
+        </form>
+
+        <h1 className="mt-12 text-2xl font-semibold tracking-tight">Start a queue</h1>
         <p className="mt-2 text-sm text-muted-foreground">
           Set up a shared resource and get a code to pass around.
         </p>

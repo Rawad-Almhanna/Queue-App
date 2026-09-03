@@ -8,7 +8,7 @@
  */
 
 import { test, expect, loadAllTestAccounts } from 'deepspace/testing'
-import { authToken, callAction, postAction, testRoomName } from './helpers/queue'
+import { authToken, callAction, createTestRoom, postAction, testRoomName } from './helpers/queue'
 import { ROOM_CODE_ALPHABET, ROOM_CODE_LENGTH } from '../src/queue/types'
 
 test.describe('API tests', () => {
@@ -176,5 +176,69 @@ test.describe('createRoom action (signed in)', () => {
     expect(result.success).toBe(false)
     if (result.success) return
     expect(result.error).toMatch(/name/i)
+  })
+})
+
+test.describe('joinQueue action', () => {
+  test('refuses a caller with no bearer token', async ({ request }) => {
+    const res = await request.post('/api/actions/joinQueue', {
+      data: { code: 'ABC234', displayName: 'Nobody' },
+    })
+    expect(res.status()).toBe(401)
+  })
+
+  test.describe('signed in', () => {
+    test.skip(loadAllTestAccounts().length < 1, 'Needs 1 usable test account.')
+
+    test('refuses a malformed room code', async ({ users }) => {
+      const [alice] = await users(1)
+      await alice.page.goto('/home')
+
+      const result = await callAction(alice.page, 'joinQueue', { code: 'nope', displayName: 'A' })
+      expect(result.success).toBe(false)
+      if (!result.success) expect(result.error).toMatch(/not a valid room code/i)
+    })
+
+    test('refuses a well-formed code for a room that does not exist', async ({ users }) => {
+      const [alice] = await users(1)
+      await alice.page.goto('/home')
+
+      const result = await callAction(alice.page, 'joinQueue', { code: 'ZZZZZZ', displayName: 'A' })
+      expect(result.success).toBe(false)
+      if (!result.success) expect(result.error).toMatch(/no queue found/i)
+    })
+
+    test('refuses a blank display name', async ({ users }) => {
+      const [alice] = await users(1)
+      await alice.page.goto('/home')
+
+      const { code } = await createTestRoom(alice.page, { name: testRoomName('Blank name') })
+      const result = await callAction(alice.page, 'joinQueue', { code, displayName: '   ' })
+
+      expect(result.success).toBe(false)
+      if (!result.success) expect(result.error).toMatch(/display name/i)
+    })
+
+    test('gives the first joiner the turn and the second a place in line', async ({ users }) => {
+      const [alice, bob] = await users(2)
+      await alice.page.goto('/home')
+      await bob.page.goto('/home')
+
+      const { code } = await createTestRoom(alice.page, { name: testRoomName('Handoff') })
+
+      const first = await callAction<{ hasTurn: boolean }>(alice.page, 'joinQueue', {
+        code,
+        displayName: 'Alice',
+      })
+      expect(first.success).toBe(true)
+      if (first.success) expect(first.data.hasTurn).toBe(true)
+
+      const second = await callAction<{ hasTurn: boolean }>(bob.page, 'joinQueue', {
+        code,
+        displayName: 'Bob',
+      })
+      expect(second.success).toBe(true)
+      if (second.success) expect(second.data.hasTurn).toBe(false)
+    })
   })
 })

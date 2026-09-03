@@ -10,8 +10,10 @@
 
 import type { ActionHandler } from 'deepspace/worker'
 import type { Env } from '../../worker'
+import { join } from '../queue/logic'
 import { generateRoomCode, isValidRoomCode, normalizeRoomCode, validateCreateRoom } from '../queue/room'
-import type { QueueRoomData } from '../queue/types'
+import { MAX_NAME_LENGTH, type QueueRoomData } from '../queue/types'
+import { applyPlan, loadQueueState } from './queue-state'
 
 /** Collision odds on a 31^6 space are tiny; a few retries make them nil. */
 const ROOM_CODE_ATTEMPTS = 6
@@ -62,4 +64,31 @@ export const getRoom: ActionHandler<Env> = async ({ params, tools }) => {
     success: true,
     data: { code, room: record.data, ownerUserId: record.createdBy ?? '' },
   }
+}
+
+/**
+ * Takes a place in line — or the turn itself, when the resource is free.
+ *
+ * The caller's id comes from the verified JWT, never from `params`, and the
+ * `userBound` column on queue_entries makes the room enforce that too. All
+ * this handler decides is the display name; `join` decides everything else.
+ */
+export const joinQueue: ActionHandler<Env> = async ({ userId, params, tools }) => {
+  const code = normalizeRoomCode(String(params.code ?? ''))
+  if (!isValidRoomCode(code)) return { success: false, error: 'That is not a valid room code.' }
+
+  const displayName = String(params.displayName ?? '')
+    .trim()
+    .slice(0, MAX_NAME_LENGTH)
+
+  const loaded = await loadQueueState(tools, code)
+  if (!loaded.ok) return { success: false, error: loaded.error }
+
+  const decision = join(loaded.state, { userId, displayName, now: Date.now() })
+  if (!decision.ok) return { success: false, error: decision.error }
+
+  const applied = await applyPlan(tools, code, decision.plan)
+  if (!applied.ok) return { success: false, error: applied.error }
+
+  return { success: true, data: { code, hasTurn: Boolean(decision.plan.roomPatch.holderUserId) } }
 }

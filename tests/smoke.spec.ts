@@ -129,6 +129,40 @@ test.describe('Create queue page', () => {
       await expect(alice.page.getByTestId('room-created')).toHaveCount(0)
     })
 
+    test('join-by-code rejects a malformed code and an unknown one', async ({ users }) => {
+      const [alice] = await users(1)
+      await alice.page.goto('/queue')
+      await expect(alice.page.getByTestId('join-by-code-form')).toBeVisible({ timeout: 15000 })
+
+      await alice.page.getByTestId('join-code-input').fill('AB1')
+      await alice.page.getByTestId('join-by-code-submit').click()
+      await expect(alice.page.getByTestId('join-code-error')).toContainText('6 characters')
+
+      await alice.page.getByTestId('join-code-input').fill('ZZZZZZ')
+      await alice.page.getByTestId('join-by-code-submit').click()
+      await expect(alice.page.getByTestId('join-code-error')).toContainText('No queue found')
+
+      // A refused code must not navigate away from the hub.
+      expect(new URL(alice.page.url()).pathname).toBe('/queue')
+    })
+
+    test('creating a queue leads into the room', async ({ users }) => {
+      const [alice] = await users(1)
+      await alice.page.goto('/queue')
+      await expect(alice.page.getByTestId('create-room-form')).toBeVisible({ timeout: 15000 })
+
+      const name = `__test-${Date.now()}__ Printer`
+      await alice.page.getByTestId('room-name-input').fill(name)
+      await alice.page.getByTestId('create-room-submit').click()
+
+      await expect(alice.page.getByTestId('room-created')).toBeVisible({ timeout: 15000 })
+      const code = (await alice.page.getByTestId('room-code').textContent())?.trim()
+
+      await alice.page.getByTestId('open-created-room').click()
+      await expect(alice.page.getByTestId('room-title')).toHaveText(name, { timeout: 15000 })
+      expect(new URL(alice.page.url()).pathname).toBe(`/q/${code}`)
+    })
+
     test('rejects a turn length that is not a number', async ({ users }) => {
       const [alice] = await users(1)
       await alice.page.goto('/queue')
