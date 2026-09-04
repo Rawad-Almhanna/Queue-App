@@ -36,7 +36,13 @@ const MAX_ENTRIES_PER_ROOM = 200
 export type QueueTools = Pick<ActionTools, 'get' | 'query' | 'create' | 'update' | 'remove'>
 
 export type LoadResult = { ok: true; state: QueueState } | { ok: false; error: string }
-export type ApplyResult = { ok: true } | { ok: false; error: string }
+
+/**
+ * `conflict` marks the one failure that is not a problem: another writer moved
+ * the turn between this plan being computed and applied. The work still got
+ * done, just not by us, so callers count it separately from a real fault.
+ */
+export type ApplyResult = { ok: true } | { ok: false; error: string; conflict?: boolean }
 
 export async function loadQueueState(tools: QueueTools, code: string): Promise<LoadResult> {
   const roomResult = await tools.get<QueueRoomData>('queue_rooms', code)
@@ -92,7 +98,7 @@ export async function applyPlan(
     const current = await tools.get<QueueRoomData>('queue_rooms', code)
     if (!current.success) return { ok: false, error: 'That queue no longer exists.' }
     if (current.data.record.data.turnSeq !== plan.expectedTurnSeq) {
-      return { ok: false, error: 'The queue just changed. Try that again.' }
+      return { ok: false, error: 'The queue just changed. Try that again.', conflict: true }
     }
   }
 
@@ -103,7 +109,13 @@ export async function applyPlan(
 
   for (const recordId of plan.deleteEntries) {
     const removed = await tools.remove('queue_entries', recordId)
-    if (!removed.success) return { ok: false, error: removed.error }
+    // A row that is already gone is the state this plan was asking for, not a
+    // failure. Aborting here would skip the renumbering below and leave the
+    // queue with stale positions — the plan half-applied because a concurrent
+    // writer got to the same row first and did us the favour.
+    if (!removed.success && !isMissingRecord(removed.error)) {
+      return { ok: false, error: removed.error }
+    }
   }
 
   for (const data of plan.createEntries) {
@@ -120,10 +132,19 @@ export async function applyPlan(
 
   for (const { recordId, patch } of plan.updateEntries) {
     const updated = await tools.update<QueueEntryData>('queue_entries', recordId, patch)
-    if (!updated.success) return { ok: false, error: updated.error }
+    // Likewise: renumbering someone who left mid-plan is moot, and the
+    // remaining rows still deserve their new positions.
+    if (!updated.success && !isMissingRecord(updated.error)) {
+      return { ok: false, error: updated.error }
+    }
   }
 
   return { ok: true }
+}
+
+/** Both the action tools and the cron adapter phrase this the same way. */
+function isMissingRecord(error: string | undefined): boolean {
+  return /not found/i.test(error ?? '')
 }
 
 /**
@@ -182,7 +203,13 @@ export async function sweepRoom(
   if (!plan) return { ok: true, event: null }
 
   const applied = await applyPlan(tools, code, plan)
-  if (!applied.ok) return { ok: false, error: applied.error }
+  // Losing the race means somebody else already moved this queue on, which is
+  // the outcome this call wanted. Reporting it as a failure would have the
+  // caller retry work that no longer needs doing.
+  if (!applied.ok) {
+    if (applied.conflict) return { ok: true, event: null }
+    return { ok: false, error: applied.error }
+  }
 
   return { ok: true, event: plan.event }
 }
@@ -200,6 +227,8 @@ function mightBeDue(room: QueueRoom, now: number): boolean {
 export interface SweepReport {
   scanned: number
   advanced: number
+  /** Rooms another writer got to first — expected under load, not a fault. */
+  skipped: number
   errors: string[]
 }
 
@@ -215,7 +244,7 @@ export async function sweepAllRooms(
   now: number = Date.now(),
   limits: { rooms?: number; entries?: number } = {},
 ): Promise<SweepReport> {
-  const report: SweepReport = { scanned: 0, advanced: 0, errors: [] }
+  const report: SweepReport = { scanned: 0, advanced: 0, skipped: 0, errors: [] }
 
   const roomsResult = await tools.query<QueueRoomData>('queue_rooms', {
     limit: limits.rooms ?? 500,
@@ -260,7 +289,8 @@ export async function sweepAllRooms(
 
     const applied = await applyPlan(tools, record.recordId, plan)
     if (!applied.ok) {
-      report.errors.push(`${record.recordId}: ${applied.error}`)
+      if (applied.conflict) report.skipped += 1
+      else report.errors.push(`${record.recordId}: ${applied.error}`)
       continue
     }
     report.advanced += 1

@@ -33,10 +33,13 @@ export async function runTask(name: string, env: unknown): Promise<void> {
   const report = await sweepAllRooms(cronToQueueTools(ctx))
 
   // Only worth a log line when the tick actually did something; an idle app
-  // ticking every minute should not fill the log with "advanced 0".
+  // ticking every minute should not fill the log with "advanced 0". `skipped`
+  // is reported but never on its own — losing a race to a client's nudge is
+  // routine, and a log that cries wolf is one nobody reads.
   if (report.advanced > 0 || report.errors.length > 0) {
     console.info(
       `[cron] ${EXPIRE_TURNS_TASK} scanned=${report.scanned} advanced=${report.advanced}` +
+        ` skipped=${report.skipped}` +
         (report.errors.length > 0 ? ` errors=${JSON.stringify(report.errors)}` : ''),
     )
   }

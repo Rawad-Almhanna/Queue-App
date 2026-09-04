@@ -427,6 +427,111 @@ describe('sweepAllRooms — the scheduled tick', () => {
     expect(store.entries.has('e1')).toBe(false)
   })
 
+  it('treats an entry that vanished mid-plan as done, and still renumbers', async () => {
+    const store = fakeTools()
+    store.seedRoom(
+      'AAA111',
+      room({
+        holderUserId: 'u-alice',
+        holderName: 'Alice',
+        turnAssignedAt: T0,
+        turnStartedAt: T0,
+        turnSeq: 1,
+      }),
+    )
+    store.seedEntry('e1', entry({ userId: 'u-bob', displayName: 'Bob', position: 1 }))
+    store.seedEntry('e2', entry({ userId: 'u-cara', displayName: 'Cara', position: 2 }))
+    store.seedEntry('e3', entry({ userId: 'u-dan', displayName: 'Dan', position: 3 }))
+
+    // Bob's row disappears between the read and the write — a concurrent leave,
+    // or a second sweeper that got there first.
+    const racing = {
+      ...(store.tools as unknown as Record<string, unknown>),
+      remove: async (collection: string, recordId: string) => {
+        if (recordId === 'e1') return { success: false, error: 'Record not found' }
+        return (store.tools as unknown as { remove: Function }).remove(collection, recordId)
+      },
+    } as unknown as QueueTools
+
+    const report = await sweepAllRooms(racing, T0 + 61_000)
+
+    // The hand-off is not abandoned, and — the actual bug — the survivors are
+    // still renumbered rather than left holding their old positions.
+    expect(report.advanced).toBe(1)
+    expect(report.errors).toEqual([])
+    expect(store.rooms.get('AAA111')?.data.holderUserId).toBe('u-bob')
+    expect(store.entries.get('e2')?.data.position).toBe(1)
+    expect(store.entries.get('e3')?.data.position).toBe(2)
+  })
+
+  it('counts a lost race as skipped, not as an error', async () => {
+    const store = fakeTools()
+    store.seedRoom(
+      'AAA111',
+      room({
+        holderUserId: 'u-alice',
+        holderName: 'Alice',
+        turnAssignedAt: T0,
+        turnStartedAt: T0,
+        turnSeq: 1,
+      }),
+    )
+    store.seedEntry('e1', entry())
+
+    // Between the read and the write, somebody else advances the turn — which
+    // is exactly what the room page's nudge does under a cron tick.
+    const racing = {
+      ...(store.tools as unknown as Record<string, unknown>),
+      get: async (collection: string, recordId: string) => {
+        const result = await (
+          store.tools as unknown as { get: Function }
+        ).get(collection, recordId)
+        if (collection === 'queue_rooms' && result.success) {
+          return {
+            success: true,
+            data: {
+              record: {
+                ...result.data.record,
+                data: { ...result.data.record.data, turnSeq: 99 },
+              },
+            },
+          }
+        }
+        return result
+      },
+    } as unknown as QueueTools
+
+    const report = await sweepAllRooms(racing, T0 + 61_000)
+
+    expect(report.errors).toEqual([])
+    expect(report.skipped).toBe(1)
+    expect(report.advanced).toBe(0)
+  })
+
+  it('still reports a genuine write failure', async () => {
+    const store = fakeTools()
+    store.seedRoom(
+      'AAA111',
+      room({
+        holderUserId: 'u-alice',
+        holderName: 'Alice',
+        turnAssignedAt: T0,
+        turnStartedAt: T0,
+        turnSeq: 1,
+      }),
+    )
+    store.seedEntry('e1', entry())
+
+    const failing = {
+      ...(store.tools as unknown as Record<string, unknown>),
+      remove: async () => ({ success: false, error: 'room unreachable' }),
+    } as unknown as QueueTools
+
+    const report = await sweepAllRooms(failing, T0 + 61_000)
+    expect(report.advanced).toBe(0)
+    expect(report.errors).toEqual(['AAA111: room unreachable'])
+  })
+
   it('keeps going when one room fails, and reports it', async () => {
     const store = fakeTools()
     store.seedRoom(
